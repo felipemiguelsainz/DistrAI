@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #080808;
+    color: #f0f0f0;
+    font-family: 'Space Mono', ui-monospace, monospace;
+  }
+
+  /* Nothing-style dot grid on body */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: radial-gradient(circle, rgba(255,255,255,0.045) 1px, transparent 1px);
+    background-size: 28px 28px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  #root {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #3a3a3a; }
+  ::-webkit-scrollbar-thumb:hover { background: #ff3c00; }
+
+  /* Selection */
+  ::selection { background: #ff3c00; color: #000; }
+}
+
+@layer components {
+  .n-card {
+    @apply bg-nothing-card border border-nothing-border;
+  }
+
+  .n-input {
+    @apply w-full bg-nothing-bg border border-nothing-border px-3 py-2.5
+           text-nothing-white font-mono text-sm
+           focus:outline-none focus:border-nothing-red
+           placeholder:text-nothing-muted
+           transition-colors duration-150;
+  }
+
+  .n-btn {
+    @apply px-4 py-2.5 font-mono font-bold text-sm uppercase tracking-widest
+           transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .n-btn-red {
+    @apply n-btn bg-nothing-red text-black hover:bg-white hover:text-black;
+  }
+
+  .n-btn-ghost {
+    @apply n-btn border border-nothing-border text-nothing-light
+           hover:border-nothing-white hover:text-nothing-white;
+  }
+
+  .n-label {
+    @apply text-[10px] font-mono font-bold uppercase tracking-[0.2em] text-nothing-dim;
+  }
+}
+
+@layer utilities {
+  .dot-cursor::after {
+    content: '_';
+    animation: blink 1s step-end infinite;
+    color: #ff3c00;
+  }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

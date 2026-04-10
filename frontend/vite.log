@@ -1,0 +1,20 @@
+
+> distribuidora-frontend@0.1.0 dev
+> vite
+
+
+  [32m[1mVITE[22m v5.4.21[39m  [2mready in [0m[1m750[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5173[22m/[39m
+[2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[2m[32m  ➜[39m[22m[2m  press [22m[1mh + enter[22m[2m to show help[22m
+[2m2:14:40 PM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/CargaDatos.jsx, /src/index.css[22m
+[2m2:14:44 PM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/CargaDatos.jsx, /src/index.css[22m
+[2m2:16:22 PM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/CargaDatos.jsx, /src/index.css[22m
+[2m2:17:27 PM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Dashboard.jsx, /src/index.css[22m
+[2m2:17:36 PM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Dashboard.jsx, /src/index.css[22m
+[2m2:17:56 PM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Dashboard.jsx, /src/index.css[22m
+[2m2:30:06 PM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/hooks/useAuth.jsx, /src/index.css[22m
+[2m2:30:06 PM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/pages/Dashboard.jsx, /src/index.css[22m
+[2m2:30:08 PM[22m [36m[1m[vite][22m[39m [33mhmr invalidate [39m[2m/src/hooks/useAuth.jsx[22m Could not Fast Refresh ("useAuth" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+[2m2:30:08 PM[22m [36m[1m[vite][22m[39m [32mhmr update [39m[2m/src/App.jsx, /src/index.css, /src/components/ProtectedRoute.jsx, /src/components/Layout.jsx, /src/pages/Login.jsx, /src/pages/CargaDatos.jsx, /src/pages/Mapa.jsx, /src/pages/Dashboard.jsx[22m

@@ -1,0 +1,27 @@
+# Entorno virtual Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Variables de entorno (NUNCA commitear claves)
+.env
+.env.local
+.env.*.local
+
+# Archivos temporales de datos (CSVs grandes)
+*.csv
+*.xlsx
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+*.swp
+
+# Sistema
+.DS_Store
+Thumbs.db
