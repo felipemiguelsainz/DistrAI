@@ -54,7 +54,7 @@ const KPI_DEFS = [
 const MONTH_NAMES = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 
 export default function Dashboard() {
-  const { session } = useAuth();
+  const { session, selectedTenant } = useAuth();
   const [tab, setTab] = useState('neto');
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -75,11 +75,14 @@ export default function Dashboard() {
   const loadPeriods = useCallback(() => {
     if (periodsLoaded || !session?.access_token) return;
     setPeriodsLoaded(true);
-    fetch(`${API}/api/dashboard/periods`, { headers: headers() })
+    const params = new URLSearchParams();
+    if (selectedTenant) params.set('tenant_id', selectedTenant);
+    const qs = params.toString();
+    fetch(`${API}/api/dashboard/periods${qs ? `?${qs}` : ''}`, { headers: headers() })
       .then(r => r.ok ? r.json() : [])
       .then(setPeriods)
       .catch(() => {});
-  }, [periodsLoaded, session?.access_token, headers]);
+  }, [periodsLoaded, session?.access_token, selectedTenant, headers]);
 
   const loadDashboard = useCallback(async ({ silent = false, mes, anio } = {}) => {
     if (!session?.access_token) return;
@@ -89,6 +92,7 @@ export default function Dashboard() {
       const params = new URLSearchParams();
       if (mes != null) params.set('mes', mes);
       if (anio != null) params.set('anio', anio);
+      if (selectedTenant) params.set('tenant_id', selectedTenant);
       const qs = params.toString();
       const res = await fetch(`${API}/api/dashboard${qs ? `?${qs}` : ''}`, { headers: headers() });
       if (!res.ok) throw new Error(`ERROR ${res.status}`);
@@ -100,7 +104,15 @@ export default function Dashboard() {
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [headers, session?.access_token]);
+  }, [headers, session?.access_token, selectedTenant]);
+
+  // Reset period state when tenant selection changes
+  useEffect(() => {
+    setPeriodsLoaded(false);
+    setPeriods([]);
+    setSelectedMes(null);
+    setSelectedAnio(null);
+  }, [selectedTenant]);
 
   // Load dashboard when period selection changes
   useEffect(() => {
@@ -113,7 +125,10 @@ export default function Dashboard() {
     if (selectedMes != null || selectedAnio != null) return undefined;
     const timer = window.setInterval(async () => {
       try {
-        const res = await fetch(`${API}/api/dashboard/version`, { headers: headers() });
+        const params = new URLSearchParams();
+        if (selectedTenant) params.set('tenant_id', selectedTenant);
+        const qs = params.toString();
+        const res = await fetch(`${API}/api/dashboard/version${qs ? `?${qs}` : ''}`, { headers: headers() });
         if (!res.ok) return;
         const body = await res.json();
         const nextVersion = body.version || null;
@@ -123,7 +138,7 @@ export default function Dashboard() {
       } catch { /* ignore */ }
     }, 30000);
     return () => window.clearInterval(timer);
-  }, [headers, loadDashboard, session?.access_token, selectedMes, selectedAnio]);
+  }, [headers, loadDashboard, session?.access_token, selectedMes, selectedAnio, selectedTenant]);
 
   if (loading) {
     return (

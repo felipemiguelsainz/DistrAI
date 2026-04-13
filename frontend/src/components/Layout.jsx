@@ -1,16 +1,17 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth.jsx';
 
 const NAV = [
-  { to: '/',         label: 'DASHBOARD',   tag: '01', roles: ['admin', 'analista', 'supervisor', 'vendedor'] },
-  { to: '/mapa',     label: 'MAPA',        tag: '02', roles: ['admin', 'analista', 'supervisor', 'vendedor'] },
-  { to: '/pdv',      label: 'GESTIÓN PDV', tag: '03', roles: ['admin', 'analista'] },
-  { to: '/carga',    label: 'CARGA DATOS', tag: '04', roles: ['admin'] },
-  { to: '/usuarios', label: 'USUARIOS',    tag: '05', roles: ['admin'] },
+  { to: '/',         label: 'DASHBOARD',   tag: '01', roles: ['superadmin', 'admin', 'analista', 'supervisor', 'vendedor'] },
+  { to: '/mapa',     label: 'MAPA',        tag: '02', roles: ['superadmin', 'admin', 'analista', 'supervisor', 'vendedor'] },
+  { to: '/pdv',      label: 'GESTIÓN PDV', tag: '03', roles: ['superadmin', 'admin', 'analista'] },
+  { to: '/carga',    label: 'CARGA DATOS', tag: '04', roles: ['superadmin', 'admin'] },
+  { to: '/usuarios', label: 'USUARIOS',    tag: '05', roles: ['superadmin', 'admin'] },
 ];
 
 const ROLE_COLOR = {
+  superadmin: 'text-nothing-red',
   admin:      'text-nothing-red',
   analista:   'text-white',
   supervisor: 'text-nothing-light',
@@ -22,9 +23,24 @@ function getInitials(name) {
   return name.trim().split(/\s+/).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
 }
 
+const API = import.meta.env.VITE_API_URL;
+
 export default function Layout() {
-  const { profile, signOut } = useAuth();
+  const { profile, signOut, session, selectedTenant, setSelectedTenant } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
+  const [tenants, setTenants] = useState([]);
+
+  const isSuperadmin = profile?.rol === 'superadmin';
+
+  useEffect(() => {
+    if (!isSuperadmin || !session?.access_token) return;
+    fetch(`${API}/api/admin/tenants`, {
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    })
+      .then((r) => r.ok ? r.json() : Promise.reject(r.status))
+      .then((data) => setTenants(Array.isArray(data) ? data : []))
+      .catch((err) => console.error('[Layout] tenant fetch failed:', err));
+  }, [isSuperadmin, session?.access_token]);
 
   const visibleNav = NAV.filter((n) => n.roles.includes(profile?.rol));
   const displayName = profile?.nombre || profile?.email || '';
@@ -94,6 +110,23 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+
+        {/* Superadmin tenant selector */}
+        {isSuperadmin && !collapsed && (
+          <div className="border-t border-nothing-border px-3 py-2">
+            <p className="text-[9px] uppercase tracking-widest text-nothing-muted mb-1.5 font-bold">EMPRESA</p>
+            <select
+              value={selectedTenant || ''}
+              onChange={(e) => setSelectedTenant(e.target.value || null)}
+              className="w-full bg-nothing-bg border border-nothing-border text-nothing-light text-[10px] uppercase tracking-widest font-bold px-2 py-1.5 focus:outline-none focus:border-nothing-red transition-colors"
+            >
+              <option value="">TODAS</option>
+              {tenants.map((t) => (
+                <option key={t.id} value={t.id}>{t.nombre}</option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* User footer */}
         <div className="border-t border-nothing-border p-3 space-y-2">

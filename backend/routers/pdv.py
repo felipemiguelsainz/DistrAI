@@ -8,14 +8,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+import json
+
 import pandas as pd
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sse_starlette.sse import EventSourceResponse
 from supabase import Client
 
 from core.auth import UserContext, get_current_user, require_roles
 from core.logging_config import get_logger
 from db.supabase import get_supabase
+from services import column_mapper
 from services.geocoding import geocode_pending
 
 logger = get_logger("pdv")
@@ -111,36 +114,15 @@ def _parse_bool(val) -> Optional[bool]:
     return s in ("si", "sí", "1", "true", "yes", "x")
 
 
-def _clean_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize headers, map to DB columns, cast types."""
-    # strip whitespace from headers
-    df.columns = df.columns.str.strip()
-    logger.debug("Original headers: %s", list(df.columns))
-    # Case-insensitive mapping
-    col_rename = {}
-    for orig_col in df.columns:
-        key = orig_col.strip().lower()
-        if key in _COL_MAP_RAW:
-            col_rename[orig_col] = _COL_MAP_RAW[key]
-    # Also try matching DB column names directly (already lowercase)
-    known = set(_COL_MAP_RAW.values())
-    for orig_col in df.columns:
-        if orig_col.strip().lower() in known and orig_col not in col_rename:
-            col_rename[orig_col] = orig_col.strip().lower()
-    logger.debug("Mapped columns: %s", col_rename)
-    df = df.rename(columns=col_rename)
-    # keep only recognized columns
-    df = df[[c for c in df.columns if c in known]]
-    logger.debug("Final columns: %s", list(df.columns))
-    # booleans
+def _cast_types_pdv(df: pd.DataFrame) -> pd.DataFrame:
+    """Cast types para PDV (columnas ya renombradas al schema canónico)."""
+    canonical = column_mapper.all_fields("pdv")
+    df = df[[c for c in df.columns if c in canonical]]
     for c in BOOL_COLS & set(df.columns):
         df[c] = df[c].apply(_parse_bool)
-    # dates → string for JSON
     for c in DATE_COLS & set(df.columns):
         df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
-    # NaN → None
     df = df.where(df.notnull(), None)
-    # lat/lng to float
     for c in ("lat", "lng"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -151,7 +133,7 @@ def _upsert_chunk(sb: Client, rows: list[dict]) -> int:
     """Upsert a chunk to pdv table. Returns number of upserted rows."""
     res = sb.table("pdv").upsert(
         rows,
-        on_conflict="cod_cliente",
+        on_conflict="tenant_id,cod_cliente",
     ).execute()
     return len(res.data) if res and res.data else 0
 
@@ -160,10 +142,13 @@ def _upsert_chunk(sb: Client, rows: list[dict]) -> int:
 @router.post("/upload")
 async def upload_pdv(
     file: UploadFile = File(...),
-    user: UserContext = Depends(require_roles("admin")),
+    mapping: str | None = Form(None, description="JSON con mapeo de columnas: {COL_EXCEL: campo_canonico}"),
+    save_as_default: bool = Form(False, description="Guardar este mapeo como template default"),
+    mapping_name: str = Form("Template principal", description="Nombre del template a guardar"),
+    user: UserContext = Depends(require_roles("superadmin", "admin", "analista")),
     sb: Client = Depends(get_supabase),
 ):
-    """Upload CSV or Excel file, upsert into pdv table."""
+    """Upload CSV o Excel de maestro PDV, aplica mapeo de columnas y hace upsert."""
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
     if ext not in ("csv", "xlsx", "xls"):
         raise HTTPException(400, "Solo se aceptan archivos .csv, .xlsx o .xls")
@@ -175,19 +160,49 @@ async def upload_pdv(
     # Parse
     try:
         if ext == "csv":
-            df = pd.read_csv(io.BytesIO(contents), dtype=str)
+            for enc in ("utf-8", "latin-1", "cp1252"):
+                try:
+                    df = pd.read_csv(io.BytesIO(contents), dtype=str, encoding=enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                raise HTTPException(400, "No se pudo decodificar el archivo CSV")
         else:
             df = pd.read_excel(io.BytesIO(contents), dtype=str)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(400, f"Error al leer archivo: {exc}")
 
     if df.empty:
         raise HTTPException(400, "El archivo está vacío")
 
-    df = _clean_df(df)
+    # Resolver mapping: parámetro JSON > template default en DB > auto-detección
+    if mapping:
+        try:
+            mappings = json.loads(mapping)
+        except Exception:
+            raise HTTPException(400, "El parámetro 'mapping' no es un JSON válido")
+        logger.debug("Usando mapping provisto en el request para PDV")
+    else:
+        tpl = column_mapper.get_default_template(sb, user.tenant_id, "pdv")
+        if tpl:
+            mappings = tpl["mappings"]
+            logger.debug("Usando template guardado '%s' para PDV", tpl.get("nombre"))
+        else:
+            mappings = column_mapper.detect_columns(df.columns.tolist(), "pdv")
+            logger.debug("Sin template guardado, usando auto-detección para PDV")
+
+    df = column_mapper.apply_mapping(df, mappings)
+    df = _cast_types_pdv(df)
 
     if "cod_cliente" not in df.columns:
-        raise HTTPException(400, "Falta la columna 'Cod. Cliente' (requerida para upsert)")
+        raise HTTPException(
+            400,
+            "No se encontró el campo 'cod_cliente' (requerido). "
+            "Revisá el mapeo de columnas o cargá un archivo con las columnas correctas.",
+        )
 
     # Drop rows without cod_cliente
     df = df.dropna(subset=["cod_cliente"])
@@ -213,12 +228,21 @@ async def upload_pdv(
         if has_lng:
             df["lng"] = None
 
-    # Stamp updated_at (DB default only fires on INSERT, not on conflict UPDATE)
+    # Agregar tenant_id y timestamp a cada fila
+    df["tenant_id"] = user.tenant_id
     df["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
     total = len(df)
     job_id = str(uuid.uuid4())
     _jobs[job_id] = {"total": total, "processed": 0, "errors": 0, "status": "running"}
+
+    # Guardar template si se solicitó (antes de lanzar el job async)
+    if save_as_default and mappings:
+        try:
+            column_mapper.save_template(sb, user.tenant_id, "pdv", mapping_name, mappings, es_default=True)
+            logger.info("Template PDV '%s' guardado para tenant %s", mapping_name, user.tenant_id)
+        except Exception as exc:
+            logger.warning("No se pudo guardar template PDV: %s", exc)
 
     async def _process():
         processed = 0
@@ -282,17 +306,19 @@ async def upload_progress(job_id: str, token: str = Query("")):
 # ── Geocoding trigger ──────────────────────────────────────────────
 @router.post("/geocode")
 async def trigger_geocode(
-    user: UserContext = Depends(require_roles("admin")),
+    user: UserContext = Depends(require_roles("superadmin", "admin")),
     sb: Client = Depends(get_supabase),
     limit: int = Query(100, le=9999, description="Max rows to geocode"),
+    tenant_id: Optional[str] = Query(None, description="Tenant a geocodificar (solo superadmin)"),
 ):
     """Geocode PDV rows with status='pending'. Runs in background."""
     job_id = str(uuid.uuid4())
     _jobs[job_id] = {"total": 0, "processed": 0, "errors": 0, "status": "running"}
+    effective_tenant = tenant_id if user.is_superadmin else user.tenant_id
 
     async def _run():
         try:
-            result = await geocode_pending(sb, limit, _jobs, job_id)
+            await geocode_pending(sb, limit, _jobs, job_id, tenant_id=effective_tenant)
             _jobs[job_id]["status"] = "done"
         except Exception as exc:
             logger.error("Geocode job %s failed: %s", job_id, exc, exc_info=True)
@@ -313,9 +339,13 @@ async def list_pdv(
 ):
     """List PDVs with pagination and optional search."""
     q = sb.table("pdv").select("*", count="exact")
+    if not user.is_superadmin:
+        q = q.eq("tenant_id", user.tenant_id)
     if search:
-        # Escape PostgREST special chars in the search term to avoid query injection
-        safe = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace(",", "").replace(")", "").replace("(", "")
+        safe = (
+            search.replace("\\", "\\\\").replace("%", "\\%")
+            .replace("_", "\\_").replace(",", "").replace(")", "").replace("(", "")
+        )
         q = q.or_(f"razon_social.ilike.%{safe}%,cod_cliente.ilike.%{safe}%")
     q = q.order("id", desc=True).range(offset, offset + limit - 1)
     res = q.execute()
@@ -332,10 +362,16 @@ async def pdv_stats(
     sb: Client = Depends(get_supabase),
 ):
     """Quick stats: total, geocoded, pending."""
-    total_res = sb.table("pdv").select("id", count="exact").execute()
-    geo_ok = sb.table("pdv").select("id", count="exact").eq("geocoding_status", "ok").execute()
-    geo_pending = sb.table("pdv").select("id", count="exact").eq("geocoding_status", "pending").execute()
-    geo_failed = sb.table("pdv").select("id", count="exact").eq("geocoding_status", "failed").execute()
+    def _q():
+        q = sb.table("pdv").select("id", count="exact")
+        if not user.is_superadmin:
+            q = q.eq("tenant_id", user.tenant_id)
+        return q
+
+    total_res   = _q().execute()
+    geo_ok      = _q().eq("geocoding_status", "ok").execute()
+    geo_pending = _q().eq("geocoding_status", "pending").execute()
+    geo_failed  = _q().eq("geocoding_status", "failed").execute()
     return {
         "total": total_res.count or 0,
         "geocoded": geo_ok.count or 0,

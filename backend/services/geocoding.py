@@ -132,17 +132,19 @@ async def geocode_address(address: str) -> tuple[Optional[float], Optional[float
     return None, None, "failed"
 
 
-async def geocode_pending(sb, limit: int, jobs: dict, job_id: str) -> dict:
+async def geocode_pending(sb, limit: int, jobs: dict, job_id: str, tenant_id: str | None = None) -> dict:
     """Geocode up to `limit` PDV rows with geocoding_status='pending'."""
-    res = (
+    q = (
         sb.table("pdv")
         .select("id, domicilio, localidad, geocoding_attempts")
         .eq("geocoding_status", "pending")
         .lt("geocoding_attempts", 3)
         .order("id")
         .limit(limit)
-        .execute()
     )
+    if tenant_id:
+        q = q.eq("tenant_id", tenant_id)
+    res = q.execute()
 
     rows = res.data or []
     total = len(rows)

@@ -27,7 +27,7 @@ export default function App() {
               <Route
                 path="pdv"
                 element={
-                  <ProtectedRoute roles={['admin', 'analista']}>
+                  <ProtectedRoute roles={['superadmin', 'admin', 'analista']}>
                     <GestionPDV />
                   </ProtectedRoute>
                 }
@@ -37,7 +37,7 @@ export default function App() {
               <Route
                 path="carga"
                 element={
-                  <ProtectedRoute roles={['admin']}>
+                  <ProtectedRoute roles={['superadmin', 'admin']}>
                     <CargaDatos />
                   </ProtectedRoute>
                 }
@@ -45,7 +45,7 @@ export default function App() {
               <Route
                 path="usuarios"
                 element={
-                  <ProtectedRoute roles={['admin']}>
+                  <ProtectedRoute roles={['superadmin', 'admin']}>
                     <Usuarios />
                   </ProtectedRoute>
                 }

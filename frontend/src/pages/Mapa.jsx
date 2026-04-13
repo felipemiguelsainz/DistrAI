@@ -150,7 +150,7 @@ function Legend({ carteras }) {
 
 /* ── Main component ────────────────────────────────────────── */
 export default function Mapa() {
-  const { session } = useAuth();
+  const { session, selectedTenant } = useAuth();
   const [geojson, setGeojson] = useState(null);
   const [filtros, setFiltros] = useState({ carteras: [], zonas: [], canales: [], localidades: [] });
   const [filters, setFilters] = useState({ cartera: '', zona: '', canal: '', localidad: '' });
@@ -160,18 +160,25 @@ export default function Mapa() {
     Authorization: `Bearer ${session?.access_token}`,
   }), [session]);
 
-  // Load filter options once
+  // Load filter options once (or when tenant changes)
   useEffect(() => {
-    fetch(`${API}/api/mapa/filtros`, { headers: headers() })
+    const params = new URLSearchParams();
+    if (selectedTenant) params.set('tenant_id', selectedTenant);
+    const qs = params.toString();
+    fetch(`${API}/api/mapa/filtros${qs ? `?${qs}` : ''}`, { headers: headers() })
       .then((r) => r.ok ? r.json() : { carteras: [], zonas: [], canales: [], localidades: [] })
-      .then(setFiltros)
+      .then((data) => {
+        setFiltros(data);
+        setFilters({ cartera: '', zona: '', canal: '', localidad: '' });
+      })
       .catch(() => {});
-  }, [headers]);
+  }, [headers, selectedTenant]);
 
-  // Load GeoJSON whenever filters change
+  // Load GeoJSON whenever filters or tenant change
   useEffect(() => {
     setLoading(true);
     const params = new URLSearchParams();
+    if (selectedTenant) params.set('tenant_id', selectedTenant);
     if (filters.cartera) params.set('cartera', filters.cartera);
     if (filters.zona) params.set('zona', filters.zona);
     if (filters.canal) params.set('canal', filters.canal);
@@ -184,7 +191,7 @@ export default function Mapa() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [filters, headers]);
+  }, [filters, headers, selectedTenant]);
 
   const features = geojson?.features || [];
 

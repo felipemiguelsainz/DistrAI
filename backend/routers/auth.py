@@ -16,4 +16,5 @@ async def me(user: UserContext = Depends(get_current_user)) -> dict:
         "rol": user.rol,
         "cartera": user.cartera,
         "nombre": user.nombre,
+        "tenant_id": user.tenant_id,
     }

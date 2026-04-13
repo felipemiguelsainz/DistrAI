@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Query
 from supabase import Client
 
@@ -15,28 +17,42 @@ router = APIRouter()
 async def pdv_geojson(
     user: UserContext = Depends(get_current_user),
     sb: Client = Depends(get_supabase),
+    tenant_id: Optional[str] = Query(None, description="Filtrar por tenant (solo superadmin)"),
     cartera: str = Query("", description="Filtrar por cartera"),
     zona: str = Query("", description="Filtrar por zona"),
     canal: str = Query("", description="Filtrar por canal de venta"),
     localidad: str = Query("", description="Filtrar por localidad"),
 ):
     """Return geocoded PDVs as GeoJSON FeatureCollection."""
-    q = sb.table("pdv").select(
-        "id, cod_cliente, razon_social, domicilio, localidad, cartera, zona, "
-        "canal_vta, vendedor, lat, lng, geocoding_status, tel_movil, categoria_iva"
-    ).eq("geocoding_status", "ok")
+    def _build_q():
+        q = sb.table("pdv").select(
+            "id, cod_cliente, razon_social, domicilio, localidad, cartera, zona, "
+            "canal_vta, vendedor, lat, lng, geocoding_status, tel_movil, categoria_iva"
+        ).eq("geocoding_status", "ok")
+        if user.is_superadmin:
+            if tenant_id:
+                q = q.eq("tenant_id", tenant_id)
+        else:
+            q = q.eq("tenant_id", user.tenant_id)
+        if cartera:
+            q = q.eq("cartera", cartera)
+        if zona:
+            q = q.eq("zona", zona)
+        if canal:
+            q = q.eq("canal_vta", canal)
+        if localidad:
+            q = q.eq("localidad", localidad)
+        return q
 
-    if cartera:
-        q = q.eq("cartera", cartera)
-    if zona:
-        q = q.eq("zona", zona)
-    if canal:
-        q = q.eq("canal_vta", canal)
-    if localidad:
-        q = q.eq("localidad", localidad)
-
-    res = q.order("id").execute()
-    rows = res.data or []
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        batch = _build_q().order("id").range(offset, offset + 999).execute()
+        data = batch.data or []
+        rows.extend(data)
+        if len(data) < 1000:
+            break
+        offset += 1000
 
     features = []
     for r in rows:
@@ -73,19 +89,40 @@ async def pdv_geojson(
 async def filtros_mapa(
     user: UserContext = Depends(get_current_user),
     sb: Client = Depends(get_supabase),
+    tenant_id: Optional[str] = Query(None, description="Filtrar por tenant (solo superadmin)"),
 ):
     """Return distinct values for filter dropdowns."""
-    carteras = sb.table("pdv").select("cartera").eq("geocoding_status", "ok").execute()
-    zonas = sb.table("pdv").select("zona").eq("geocoding_status", "ok").execute()
-    canales = sb.table("pdv").select("canal_vta").eq("geocoding_status", "ok").execute()
-    localidades = sb.table("pdv").select("localidad").eq("geocoding_status", "ok").execute()
+    def _fetch_col(col: str) -> list[dict]:
+        def _build_col_q():
+            q = sb.table("pdv").select(col).eq("geocoding_status", "ok")
+            if user.is_superadmin:
+                if tenant_id:
+                    q = q.eq("tenant_id", tenant_id)
+            else:
+                q = q.eq("tenant_id", user.tenant_id)
+            return q
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            batch = _build_col_q().range(offset, offset + 999).execute()
+            data = batch.data or []
+            rows.extend(data)
+            if len(data) < 1000:
+                break
+            offset += 1000
+        return rows
+
+    carteras    = _fetch_col("cartera")
+    zonas       = _fetch_col("zona")
+    canales     = _fetch_col("canal_vta")
+    localidades = _fetch_col("localidad")
 
     def unique_sorted(data, key):
         return sorted(set(r[key] for r in (data or []) if r.get(key)))
 
     return {
-        "carteras": unique_sorted(carteras.data, "cartera"),
-        "zonas": unique_sorted(zonas.data, "zona"),
-        "canales": unique_sorted(canales.data, "canal_vta"),
-        "localidades": unique_sorted(localidades.data, "localidad"),
+        "carteras":   unique_sorted(carteras,    "cartera"),
+        "zonas":      unique_sorted(zonas,       "zona"),
+        "canales":    unique_sorted(canales,     "canal_vta"),
+        "localidades": unique_sorted(localidades, "localidad"),
     }

@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from core.config import get_settings
 from core.logging_config import get_logger, setup_logging
-from routers import auth, pdv, mapa, dashboard, ventas
+from routers import auth, pdv, mapa, dashboard, ventas, tenants
 
 setup_logging()
 logger = get_logger("main")
@@ -44,10 +44,25 @@ def create_app() -> FastAPI:
     @application.middleware("http")
     async def log_requests(request: Request, call_next):
         start = time.perf_counter()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            logger.error(
+                "%s %s -> 500 (%.1f ms) %s",
+                request.method,
+                request.url.path,
+                elapsed_ms,
+                exc,
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={"detail": f"Error interno: {exc}"},
+            )
         elapsed_ms = (time.perf_counter() - start) * 1000
         logger.info(
-            "%s %s → %d  (%.1f ms)",
+            "%s %s -> %d  (%.1f ms)",
             request.method,
             request.url.path,
             response.status_code,
@@ -69,11 +84,12 @@ def create_app() -> FastAPI:
             content={"detail": f"Error interno: {exc}"},
         )
 
-    application.include_router(auth.router, prefix="/api/auth", tags=["auth"])
-    application.include_router(pdv.router, prefix="/api/pdv", tags=["pdv"])
-    application.include_router(mapa.router, prefix="/api/mapa", tags=["mapa"])
-    application.include_router(dashboard.router, prefix="/api/dashboard", tags=["dashboard"])
-    application.include_router(ventas.router, prefix="/api/ventas", tags=["ventas"])
+    application.include_router(auth.router,      prefix="/api/auth",      tags=["auth"])
+    application.include_router(pdv.router,       prefix="/api/pdv",       tags=["pdv"])
+    application.include_router(mapa.router,      prefix="/api/mapa",      tags=["mapa"])
+    application.include_router(dashboard.router, prefix="/api/dashboard",  tags=["dashboard"])
+    application.include_router(ventas.router,    prefix="/api/ventas",    tags=["ventas"])
+    application.include_router(tenants.router,   prefix="/api/admin",     tags=["admin"])
 
     return application
 
@@ -84,3 +100,4 @@ app = create_app()
 @app.get("/api/health", tags=["health"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
+    

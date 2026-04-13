@@ -11,6 +11,7 @@ export function AuthProvider({ children }) {
   const [profileError, setProfileError] = useState(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [selectedTenant, setSelectedTenant] = useState(null);
 
   const fetchProfile = useCallback(async (accessToken) => {
     setProfileLoading(true);
@@ -72,9 +73,10 @@ export function AuthProvider({ children }) {
     if (supabase) await supabase.auth.signOut();
     setSession(null);
     setProfile(null);
+    setSelectedTenant(null);
   }, []);
 
-  const value = { session, profile, profileError, profileLoading, loading, signIn, signOut };
+  const value = { session, profile, profileError, profileLoading, loading, signIn, signOut, selectedTenant, setSelectedTenant };
 
   return (
     <AuthContext.Provider value={value}>

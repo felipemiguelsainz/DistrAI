@@ -16,17 +16,30 @@ _bearer = HTTPBearer()
 class UserContext:
     """Resolved user from JWT + perfiles table."""
 
-    __slots__ = ("uid", "email", "rol", "cartera", "nombre")
+    __slots__ = ("uid", "email", "rol", "cartera", "nombre", "tenant_id")
 
-    def __init__(self, uid: str, email: str, rol: str, cartera: str | None, nombre: str | None):
+    def __init__(
+        self,
+        uid: str,
+        email: str,
+        rol: str,
+        cartera: str | None,
+        nombre: str | None,
+        tenant_id: str | None,
+    ):
         self.uid = uid
         self.email = email
         self.rol = rol
         self.cartera = cartera
         self.nombre = nombre
+        self.tenant_id = tenant_id  # None solo para superadmin
 
     def __repr__(self) -> str:
-        return f"<User {self.email} rol={self.rol}>"
+        return f"<User {self.email} rol={self.rol} tenant={self.tenant_id}>"
+
+    @property
+    def is_superadmin(self) -> bool:
+        return self.rol == "superadmin"
 
 
 async def get_current_user(
@@ -50,10 +63,13 @@ async def get_current_user(
 
     # Fetch profile (uses service key, bypasses RLS)
     try:
-        res = sb.table("perfiles").select("rol, cartera, nombre, activo").eq("id", uid).maybe_single().execute()
+        res = sb.table("perfiles").select("rol, cartera, nombre, activo, tenant_id").eq("id", uid).maybe_single().execute()
     except Exception as exc:
         logger.error("perfiles query failed for uid=%s: %s", uid, exc, exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error de base de datos: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="No se pudo verificar el usuario. Intente más tarde.",
+        )
 
     # maybe_single() returns None when no row found
     profile = res.data if res is not None else None
@@ -63,12 +79,21 @@ async def get_current_user(
     if not profile.get("activo", False):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Usuario desactivado")
 
+    rol = profile["rol"]
+    tenant_id = profile.get("tenant_id")
+
+    # Todos los roles excepto superadmin deben pertenecer a un tenant
+    if rol != "superadmin" and not tenant_id:
+        logger.error("Usuario uid=%s tiene rol=%s pero sin tenant_id asignado", uid, rol)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Usuario sin distribuidora asignada. Contactá al admin.")
+
     return UserContext(
         uid=uid,
         email=email,
-        rol=profile["rol"],
+        rol=rol,
         cartera=profile.get("cartera"),
         nombre=profile.get("nombre"),
+        tenant_id=tenant_id,
     )
 
 

@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from supabase import Client
 
 from core.auth import UserContext
+from db.direct import get_direct_conn
 
 
 def _safe_float(value: object) -> float:
@@ -46,12 +47,12 @@ def _fetch_all(
 			query = query.lte(field, value)
 		if order_by:
 			query = query.order(order_by[0], desc=order_by[1])
-		batch = query.range(offset, offset + 9999).execute()
+		batch = query.range(offset, offset + 999).execute()
 		data = batch.data or []
 		rows.extend(data)
-		if len(data) < 10000:
+		if len(data) < 1000:
 			break
-		offset += 10000
+		offset += 1000
 	return rows
 
 
@@ -99,18 +100,19 @@ def _business_days_between(start: date, end: date, holidays: set[date]) -> int:
 	return total
 
 
-def _get_scope(sb: Client, user: UserContext) -> dict[str, object]:
-	scope = {"carteras": None, "supervisor": None}
+def _get_scope(sb: Client, user: UserContext, tenant_id_override: str | None = None) -> dict[str, object]:
+	# Superadmin: use the explicit override (None = all tenants, UUID = specific tenant)
+	# Regular users: always scope to their own tenant_id
+	effective_tenant = tenant_id_override if user.is_superadmin else user.tenant_id
+	scope = {"carteras": None, "supervisor": None, "tenant_id": effective_tenant}
 	if user.rol == "vendedor" and user.cartera:
 		scope["carteras"] = [user.cartera]
 	elif user.rol == "supervisor" and user.nombre:
 		scope["supervisor"] = user.nombre
-		rows = _fetch_all(
-			sb,
-			"supervisores",
-			"cartera",
-			eq_filters={"supervisor": user.nombre},
-		)
+		eq_f: dict[str, object] = {"supervisor": user.nombre}
+		if effective_tenant:
+			eq_f["tenant_id"] = effective_tenant
+		rows = _fetch_all(sb, "supervisores", "cartera", eq_filters=eq_f)
 		carteras = sorted({row.get("cartera") for row in rows if row.get("cartera")})
 		if carteras:
 			scope["carteras"] = carteras
@@ -118,8 +120,10 @@ def _get_scope(sb: Client, user: UserContext) -> dict[str, object]:
 
 
 def _summary_rows_for_month(sb: Client, scope: dict[str, object], latest_date: date) -> tuple[list[dict], bool]:
-	eq_filters = {"mes": latest_date.month, "anio": latest_date.year}
-	in_filters = {}
+	eq_filters: dict[str, object] = {"mes": latest_date.month, "anio": latest_date.year}
+	in_filters: dict[str, list[object]] = {}
+	if scope.get("tenant_id"):
+		eq_filters["tenant_id"] = scope["tenant_id"]
 	if scope.get("carteras"):
 		in_filters["cartera"] = scope["carteras"]
 	if scope.get("supervisor"):
@@ -146,8 +150,11 @@ def _summary_rows_for_month(sb: Client, scope: dict[str, object], latest_date: d
 
 
 def _ventas_filters_for_scope(scope: dict[str, object]) -> tuple[dict[str, object], dict[str, list[object]]]:
-	eq_filters = {}
-	in_filters = {}
+	eq_filters: dict[str, object] = {}
+	in_filters: dict[str, list[object]] = {}
+	# Siempre filtrar por tenant (el service key bypasa RLS, hay que hacerlo explícito)
+	if scope.get("tenant_id"):
+		eq_filters["tenant_id"] = scope["tenant_id"]
 	if scope.get("carteras"):
 		in_filters["cartera"] = scope["carteras"]
 	elif scope.get("supervisor"):
@@ -168,17 +175,49 @@ def _latest_sales_date(sb: Client, scope: dict[str, object]) -> date | None:
 	return _parse_iso_date(rows[0].get("fecha_comprobante")) if rows else None
 
 
-def _month_sales_rows(sb: Client, scope: dict[str, object], latest_date: date) -> list[dict]:
-	eq_filters, in_filters = _ventas_filters_for_scope(scope)
-	return _fetch_all(
-		sb,
-		"ventas",
-		"categoria,neto,kilos,pdv_codigo,fecha_comprobante",
-		eq_filters=eq_filters,
-		in_filters=in_filters,
-		gte_filters={"fecha_comprobante": _first_day_of_month(latest_date).isoformat()},
-		lte_filters={"fecha_comprobante": latest_date.isoformat()},
-	)
+def _rpc_count_pdvs(sb: Client, scope: dict[str, object], start: date, end: date) -> int:
+	"""COUNT(DISTINCT razon_social) via direct psycopg — bypasses PostgREST timeout."""
+	tenant_id = scope.get("tenant_id")
+	carteras = scope.get("carteras")
+	supervisor = scope.get("supervisor")
+	conn = get_direct_conn()
+	try:
+		with conn.cursor() as cur:
+			cur.execute("""
+				SELECT count(distinct razon_social)
+				FROM public.ventas
+				WHERE (%(tid)s::uuid IS NULL OR tenant_id = %(tid)s::uuid)
+				  AND fecha_comprobante BETWEEN %(start)s AND %(end)s
+				  AND (%(carteras)s::text[] IS NULL OR cartera = ANY(%(carteras)s::text[]))
+				  AND (%(supervisor)s::text IS NULL OR supervisor = %(supervisor)s::text)
+			""", {"tid": tenant_id, "start": start, "end": end,
+				  "carteras": carteras, "supervisor": supervisor})
+			return int(cur.fetchone()[0] or 0)
+	finally:
+		conn.close()
+
+
+def _rpc_sum_neto_kilos(sb: Client, scope: dict[str, object], start: date, end: date) -> tuple[float, float]:
+	"""SUM(neto, kilos) via direct psycopg — bypasses PostgREST timeout."""
+	tenant_id = scope.get("tenant_id")
+	carteras = scope.get("carteras")
+	supervisor = scope.get("supervisor")
+	conn = get_direct_conn()
+	try:
+		with conn.cursor() as cur:
+			cur.execute("""
+				SELECT coalesce(sum(neto), 0), coalesce(sum(kilos), 0)
+				FROM public.ventas
+				WHERE (%(tid)s::uuid IS NULL OR tenant_id = %(tid)s::uuid)
+				  AND fecha_comprobante BETWEEN %(start)s AND %(end)s
+				  AND (%(carteras)s::text[] IS NULL OR cartera = ANY(%(carteras)s::text[]))
+				  AND (%(supervisor)s::text IS NULL OR supervisor = %(supervisor)s::text)
+			""", {"tid": tenant_id, "start": start, "end": end,
+				  "carteras": carteras, "supervisor": supervisor})
+			row = cur.fetchone()
+			return float(row[0] or 0), float(row[1] or 0)
+	finally:
+		conn.close()
 
 
 def _day_sales_rows(sb: Client, scope: dict[str, object], target_date: date) -> list[dict]:
@@ -193,22 +232,6 @@ def _day_sales_rows(sb: Client, scope: dict[str, object], target_date: date) -> 
 	)
 
 
-def _previous_period_rows(sb: Client, scope: dict[str, object], latest_date: date) -> list[dict]:
-	previous_month = _month_shift(latest_date, -1)
-	start = previous_month.replace(day=1)
-	end = previous_month.replace(day=min(latest_date.day, calendar.monthrange(previous_month.year, previous_month.month)[1]))
-	eq_filters, in_filters = _ventas_filters_for_scope(scope)
-	return _fetch_all(
-		sb,
-		"ventas",
-		"neto,kilos,pdv_codigo",
-		eq_filters=eq_filters,
-		in_filters=in_filters,
-		gte_filters={"fecha_comprobante": start.isoformat()},
-		lte_filters={"fecha_comprobante": end.isoformat()},
-	)
-
-
 def _holiday_set(sb: Client, latest_date: date) -> set[date]:
 	rows = _fetch_all(
 		sb,
@@ -220,16 +243,18 @@ def _holiday_set(sb: Client, latest_date: date) -> set[date]:
 	return {parsed for row in rows if (parsed := _parse_iso_date(row.get("fecha")))}
 
 
-def _config_token(sb: Client) -> str | None:
-	row = sb.table("config").select("value,updated_at").eq("key", "ventas_ultima_actualizacion").maybe_single().execute().data
+def _config_token(sb: Client, tenant_id: str | None = None) -> str | None:
+	key = f"tenant:{tenant_id}:ventas_ultima_actualizacion" if tenant_id else "ventas_ultima_actualizacion"
+	res = sb.table("config").select("value,updated_at").eq("key", key).maybe_single().execute()
+	row = res.data if res is not None else None
 	if not row:
 		return None
 	value = row.get("value") or {}
 	return value.get("timestamp") or row.get("updated_at")
 
 
-def build_dashboard_dataset(sb: Client, user: UserContext, *, mes: int | None = None, anio: int | None = None) -> dict:
-	scope = _get_scope(sb, user)
+def build_dashboard_dataset(sb: Client, user: UserContext, *, mes: int | None = None, anio: int | None = None, tenant_id_override: str | None = None) -> dict:
+	scope = _get_scope(sb, user, tenant_id_override=tenant_id_override)
 
 	# If specific month/year requested, find the last date within that month
 	if mes is not None and anio is not None:
@@ -249,7 +274,7 @@ def build_dashboard_dataset(sb: Client, user: UserContext, *, mes: int | None = 
 	if latest_date is None:
 		total_pdv = sb.table("pdv").select("id", count="exact", head=True).execute().count or 0
 		return {
-			"version": _config_token(sb),
+			"version": _config_token(sb, scope.get("tenant_id")),
 			"latest_date": None,
 			"business_days": {"elapsed": 0, "total": 0},
 			"header": {
@@ -273,11 +298,18 @@ def build_dashboard_dataset(sb: Client, user: UserContext, *, mes: int | None = 
 	total_days = _business_days_between(_first_day_of_month(latest_date), _last_day_of_month(latest_date), holidays)
 
 	summary_rows, kilos_from_summary = _summary_rows_for_month(sb, scope, latest_date)
-	month_sales = _month_sales_rows(sb, scope, latest_date)
-	prev_period_sales = _previous_period_rows(sb, scope, latest_date)
 	day_7_rows = _day_sales_rows(sb, scope, latest_date - timedelta(days=7))
 	day_14_rows = _day_sales_rows(sb, scope, latest_date - timedelta(days=14))
 	today_rows = _day_sales_rows(sb, scope, latest_date)
+
+	# Fast DB-level aggregations (single HTTP call each)
+	three_months_start = _first_day_of_month(_month_shift(latest_date, -2))
+	cartera_activa = _rpc_count_pdvs(sb, scope, three_months_start, latest_date)
+	clients_this_period_count = _rpc_count_pdvs(sb, scope, _first_day_of_month(latest_date), latest_date)
+	prev_month = _month_shift(latest_date, -1)
+	prev_start = prev_month.replace(day=1)
+	prev_end = prev_month.replace(day=min(latest_date.day, calendar.monthrange(prev_month.year, prev_month.month)[1]))
+	prev_neto, prev_kilos = _rpc_sum_neto_kilos(sb, scope, prev_start, prev_end)
 
 	category_data: dict[str, dict] = defaultdict(
 		lambda: {
@@ -301,13 +333,6 @@ def build_dashboard_dataset(sb: Client, user: UserContext, *, mes: int | None = 
 		category["pdvs_acumulados"] += int(row.get("pdv_activos") or 0)
 		if kilos_from_summary:
 			category["acumulado_kilos"] += _safe_float(row.get("total_kilos"))
-
-	if not kilos_from_summary:
-		for row in month_sales:
-			categoria = row.get("categoria") or "Sin categoría"
-			category = category_data[categoria]
-			category["categoria"] = categoria
-			category["acumulado_kilos"] += _safe_float(row.get("kilos"))
 
 	for row in day_7_rows:
 		categoria = row.get("categoria") or "Sin categoría"
@@ -333,17 +358,15 @@ def build_dashboard_dataset(sb: Client, user: UserContext, *, mes: int | None = 
 			category["pdvs_hoy"].add(pdv_codigo)
 			pdvs_hoy_total.add(pdv_codigo)
 
+	total_neto = sum(row["acumulado_neto"] for row in category_data.values())
+	total_kilos = sum(row["acumulado_kilos"] for row in category_data.values())
+
 	total_pdv_query = sb.table("pdv").select("id", count="exact", head=True)
+	if scope.get("tenant_id"):
+		total_pdv_query = total_pdv_query.eq("tenant_id", scope["tenant_id"])
 	if scope.get("carteras"):
 		total_pdv_query = total_pdv_query.in_("cartera", scope["carteras"])
 	total_pdv_maestro = total_pdv_query.execute().count or 0
-
-	cartera_activa = len({row.get("pdv_codigo") for row in month_sales if row.get("pdv_codigo")})
-	prev_neto = sum(_safe_float(row.get("neto")) for row in prev_period_sales)
-	prev_kilos = sum(_safe_float(row.get("kilos")) for row in prev_period_sales)
-
-	total_neto = sum(row["acumulado_neto"] for row in category_data.values())
-	total_kilos = sum(row["acumulado_kilos"] for row in category_data.values())
 	media_neto = total_neto / elapsed_days if elapsed_days else 0
 	media_kilos = total_kilos / elapsed_days if elapsed_days else 0
 
@@ -389,7 +412,7 @@ def build_dashboard_dataset(sb: Client, user: UserContext, *, mes: int | None = 
 	clientes_rows.sort(key=lambda row: row["pdvs_acumulados"], reverse=True)
 
 	return {
-		"version": _config_token(sb),
+		"version": _config_token(sb, scope.get("tenant_id")),
 		"latest_date": latest_date.isoformat(),
 		"business_days": {"elapsed": elapsed_days, "total": total_days},
 		"header": {
@@ -400,7 +423,7 @@ def build_dashboard_dataset(sb: Client, user: UserContext, *, mes: int | None = 
 			"variacion_neto_pct": round(((total_neto / prev_neto) - 1) * 100, 2) if prev_neto else None,
 			"variacion_kilos_pct": round(((total_kilos / prev_kilos) - 1) * 100, 2) if prev_kilos else None,
 			"cartera_activa": cartera_activa,
-			"cobertura_pct": round((cartera_activa / total_pdv_maestro) * 100, 2) if total_pdv_maestro else 0,
+			"cobertura_pct": round((clients_this_period_count / cartera_activa) * 100, 2) if cartera_activa else 0,
 			"total_pdv_maestro": total_pdv_maestro,
 			"pdvs_dia": len(pdvs_hoy_total),
 		},
@@ -413,11 +436,11 @@ def build_dashboard_dataset(sb: Client, user: UserContext, *, mes: int | None = 
 	}
 
 
-def get_dashboard_version(sb: Client) -> dict[str, str | None]:
-	return {"version": _config_token(sb)}
+def get_dashboard_version(sb: Client, tenant_id: str | None = None) -> dict[str, str | None]:
+	return {"version": _config_token(sb, tenant_id)}
 
 
-def get_available_periods(sb: Client, user: UserContext) -> list[dict]:
+def get_available_periods(sb: Client, user: UserContext, tenant_id_override: str | None = None) -> list[dict]:
 	"""Return distinct year/month pairs that have sales data, sorted desc.
 
 	Since PostgREST doesn't support DISTINCT, we probe year/month combos
@@ -425,7 +448,7 @@ def get_available_periods(sb: Client, user: UserContext) -> list[dict]:
 	query returns immediately and there are at most ~24 combos to check.
 	"""
 	# Get the range of years present
-	scope = _get_scope(sb, user)
+	scope = _get_scope(sb, user, tenant_id_override=tenant_id_override)
 	eq_filters, in_filters = _ventas_filters_for_scope(scope)
 
 	# Newest row
